@@ -19,6 +19,9 @@ st.set_page_config(
 
 DATA_FILE = Path(__file__).resolve().parent / "data" / "unified_incidents.csv"
 
+# URL Backend Render Anda
+BACKEND_API_URL = "https://ddos-pref-backend.onrender.com"
+
 # Init Session State Login Status Dashboard
 if "is_logged_in" not in st.session_state:
     st.session_state["is_logged_in"] = False
@@ -43,9 +46,22 @@ EVENT_COLOR_MAP = {
 }
 
 # =========================================================
-# 🌐 KONFIGURASI URL LIBRENMS
+# 🌐 KONFIGURASI URL LIBRENMS & BACKEND API
 # =========================================================
 LIBRENMS_BASE_URL = "https://venus.xlsmart.co.id"
+
+
+def fetch_backend_incidents():
+    """Mengambil data insiden langsung dari Backend API Render."""
+    try:
+        response = requests.get(f"{BACKEND_API_URL}/api/incidents", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data:
+                return pd.DataFrame(data)
+    except Exception:
+        pass
+    return pd.DataFrame()
 
 
 def get_client_ip() -> str:
@@ -294,8 +310,12 @@ def render_dashboard_content():
         "Cross-Domain Monitoring: BGP/RPKI | DDoS | Prefix Monitoring — Target: 157.85.223.0/24 (AS59132)"
     )
 
-    data_exists = DATA_FILE.exists()
-    df = pd.read_csv(DATA_FILE) if data_exists else pd.DataFrame()
+    # Prioritaskan ambil dari Backend Render API, jika gagal fallback ke CSV lokal
+    df = fetch_backend_incidents()
+    if df.empty and DATA_FILE.exists():
+        df = pd.read_csv(DATA_FILE)
+
+    data_exists = not df.empty
     open_incidents = (
         df[df["Status"] == "OPEN"] if not df.empty else pd.DataFrame()
     )
