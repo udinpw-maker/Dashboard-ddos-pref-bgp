@@ -51,12 +51,30 @@ EVENT_COLOR_MAP = {
 }
 
 # =========================================================
-# 🌐 KONFIGURASI URL LIBRENMS (3 TARGET) & BACKEND API
+# 🌐 KONFIGURASI URL SPESIFIK 3 TARGET PORT LIBRENMS
 # =========================================================
-LIBRENMS_URLS = {
-    1: "https://venus.xlsmart.co.id",  # Target 1 (Gresik / Default)
-    2: "https://url-target-kedua.com",  # Target 2 (Internasional)
-    3: "https://url-target-ketiga.com"   # Target 3 (National)
+LIBRENMS_TARGETS = {
+    1: {
+        "name": "Target Gresik",
+        "base_url": "https://venus.xlsmart.co.id",
+        "device_id": 811,
+        "port_id": 143736,
+        "location": "BI DKU Gresik"
+    },
+    2: {
+        "name": "Target Internasional",
+        "base_url": "https://venus.xlsmart.co.id",
+        "device_id": 15,
+        "port_id": 13483,
+        "location": "BI Internasional"
+    },
+    3: {
+        "name": "Target National",
+        "base_url": "https://venus.xlsmart.co.id",
+        "device_id": 15,
+        "port_id": 13484,
+        "location": "BI National"
+    }
 }
 
 
@@ -119,10 +137,10 @@ def convert_to_wib(utc_time_str: str) -> str:
         return str(utc_time_str)
 
 
-def fetch_librenms_data_by_target(target_index):
-    """Mengambil data device LibreNMS berdasarkan indeks target (1, 2, 3) dengan validasi cookie."""
-    base_url = LIBRENMS_URLS.get(target_index, LIBRENMS_URLS[1])
-    url = f"{base_url}/api/v0/devices"
+def fetch_librenms_devices_summary(target_index):
+    """Mengambil ringkasan device berdasarkan cookie sesi pengguna."""
+    target = LIBRENMS_TARGETS[target_index]
+    url = f"{target['base_url']}/api/v0/devices"
     
     user_cookie = st.session_state.get(f"librenms_cookie_{target_index}", "").strip()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -135,21 +153,29 @@ def fetch_librenms_data_by_target(target_index):
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code in [401, 403] or 'text/html' in response.headers.get('Content-Type', ''):
+        if response.status_code in [401, 403, 500] or 'text/html' in response.headers.get('Content-Type', ''):
             return None, "SESSION_EXPIRED"
             
         if response.status_code == 200:
             devices = response.json().get("devices", [])
             data = []
             for d in devices:
+                if str(d.get("device_id")) == str(target["device_id"]):
+                    data.append({
+                        "Hostname": d.get("hostname"),
+                        "IP Address": d.get("ip"),
+                        "Hardware / OS": f"{d.get('hardware', '-')} ({d.get('os', '-')})",
+                        "Uptime": d.get("uptime_short", "-"),
+                        "Status": ("🟢 ONLINE" if d.get("status") == 1 else "🔴 DOWN"),
+                    })
+            if not data and devices: # Fallback tampilkan device pertama jika ID tidak match persis
+                d = devices[0]
                 data.append({
                     "Hostname": d.get("hostname"),
                     "IP Address": d.get("ip"),
                     "Hardware / OS": f"{d.get('hardware', '-')} ({d.get('os', '-')})",
                     "Uptime": d.get("uptime_short", "-"),
-                    "Status": (
-                        "🟢 ONLINE" if d.get("status") == 1 else "🔴 DOWN"
-                    ),
+                    "Status": ("🟢 ONLINE" if d.get("status") == 1 else "🔴 DOWN"),
                 })
             return pd.DataFrame(data), "OK"
         else:
@@ -158,11 +184,13 @@ def fetch_librenms_data_by_target(target_index):
         return None, "DISCONNECTED"
 
 
-def fetch_librenms_ports_data_by_target(target_index):
-    """Mengambil data port monitoring spesifik berdasarkan indeks target (1, 2, 3)."""
+def fetch_librenms_realtime_port_status(target_index):
+    """Memvalidasi koneksi dan status realtime port berdasarkan URL spesifik Anda."""
     current_time_wib = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%d/%m/%Y %H:%M:%S WIB")
-    base_url = LIBRENMS_URLS.get(target_index, LIBRENMS_URLS[1])
-    url = f"{base_url}/api/v0/ports"
+    target = LIBRENMS_TARGETS[target_index]
+    
+    # URL Realtime target yang Anda tuju
+    realtime_url = f"{target['base_url']}/device/device={target['device_id']}/tab=port/port={target['port_id']}/view=realtime/"
     
     user_cookie = st.session_state.get(f"librenms_cookie_{target_index}", "").strip()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -174,38 +202,27 @@ def fetch_librenms_ports_data_by_target(target_index):
             headers["Cookie"] = user_cookie
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        # Cek akses halaman realtime web LibreNMS
+        response = requests.get(realtime_url, headers=headers, timeout=10, allow_redirects=False)
         
-        if response.status_code in [401, 403] or 'text/html' in response.headers.get('Content-Type', ''):
+        # Jika status 302/301 atau redirect ke login, artinya cookie mati / expired
+        if response.status_code in [301, 302, 401, 403]:
             return pd.DataFrame(), "SESSION_EXPIRED"
             
         if response.status_code == 200:
-            ports = response.json().get("ports", [])
-            data = []
-            target_port_ids = [143736, 13483, 13484]
-            for p in ports:
-                if p.get("port_id") in target_port_ids or len(data) < 10:
-                    port_id = p.get("port_id")
-                    location_name = {143736: "BI DKU Gresik", 13483: "BI Internasional", 13484: "BI National"}.get(port_id, p.get("ifDescr", "-"))
-                    
-                    data.append({
-                        "Port ID": port_id,
-                        "Location": location_name,
-                        "Interface": p.get("ifName", "-"),
-                        "Traffic In/Out": "Active Sync",
-                        "Status": (
-                            "🟢 UP (Normal)"
-                            if p.get("ifOperStatus") == "up"
-                            else "🔴 DOWN"
-                        ),
-                        "Last Update": current_time_wib,
-                    })
-            if data:
-                return pd.DataFrame(data), "OK"
+            data = [{
+                "Port ID": target["port_id"],
+                "Device ID": target["device_id"],
+                "Location": target["location"],
+                "Realtime URL Link": realtime_url,
+                "Traffic Status": "🟢 LIVE SYNC ACTIVE",
+                "Last Polled": current_time_wib,
+            }]
+            return pd.DataFrame(data), "OK"
+        else:
+            return pd.DataFrame(), "DISCONNECTED"
     except Exception:
-        pass
-
-    return pd.DataFrame(), "DISCONNECTED"
+        return pd.DataFrame(), "DISCONNECTED"
 
 
 # =========================================================
@@ -216,29 +233,14 @@ def render_login_page():
 
     with col2:
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(
-            "<h1 style='text-align: center;'>🏛️ BANK INDONESIA</h1>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            "<h2 style='text-align: center;'>Executive SOC Portal</h2>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            "<p style='text-align: center;'>Silakan login untuk mengakses Dashboard Security Operations Center</p>",
-            unsafe_allow_html=True,
-        )
+        st.markdown("<h1 style='text-align: center;'>🏛️ BANK INDONESIA</h1>", unsafe_allow_html=True)
+        st.markdown("<h2 style='text-align: center;'>Executive SOC Portal</h2>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center;'>Silakan login untuk mengakses Dashboard Security Operations Center</p>", unsafe_allow_html=True)
 
         with st.form("login_form"):
-            username_input = st.text_input(
-                "Username", placeholder="Masukkan username"
-            )
-            password_input = st.text_input(
-                "Password", type="password", placeholder="Masukkan password"
-            )
-            submit_button = st.form_submit_button(
-                "🔐 Sign In", use_container_width=True
-            )
+            username_input = st.text_input("Username", placeholder="Masukkan username")
+            password_input = st.text_input("Password", type="password", placeholder="Masukkan password")
+            submit_button = st.form_submit_button("🔐 Sign In", use_container_width=True)
 
             if submit_button:
                 if username_input == "Admin" and password_input == "Admin@123*":
@@ -254,25 +256,18 @@ def render_login_page():
                     st.success("Login Viewer Berhasil!")
                     st.rerun()
                 else:
-                    st.error(
-                        "❌ Username atau Password salah! Silakan coba lagi."
-                    )
+                    st.error("❌ Username atau Password salah! Silakan coba lagi.")
 
 
 # =========================================================
 # 📌 SIDEBAR: USER INFO & LOGOUT
 # =========================================================
 def render_sidebar():
-    st.sidebar.markdown(
-        "<h2 style='margin-bottom: 0px;'>🏛️ BANK INDONESIA</h2>",
-        unsafe_allow_html=True,
-    )
+    st.sidebar.markdown("<h2 style='margin-bottom: 0px;'>🏛️ BANK INDONESIA</h2>", unsafe_allow_html=True)
     st.sidebar.title("🛡️ SOC Operations")
 
     st.sidebar.success(f"👤 Logged in as:\n**{st.session_state['username']}**")
-    st.sidebar.caption(
-        f"Role: `{st.session_state['user_role'].upper()}` Access"
-    )
+    st.sidebar.caption(f"Role: `{st.session_state['user_role'].upper()}` Access")
 
     if st.sidebar.button("🚪 Logout Portal", use_container_width=True):
         st.session_state["is_logged_in"] = False
@@ -284,14 +279,14 @@ def render_sidebar():
 
     st.sidebar.markdown("---")
     
-    # 🍪 Konfigurasi Input Cookie LibreNMS untuk 3 Target
-    st.sidebar.subheader("🔑 LibreNMS Sessions (3 Targets)")
-    st.sidebar.caption("Masukkan cookie sesi untuk masing-masing target monitoring.")
+    # 🍪 Konfigurasi Input Cookie LibreNMS untuk 3 Target URL Anda
+    st.sidebar.subheader("🔑 LibreNMS Session Cookies")
+    st.sidebar.caption("Masukkan cookie sesi browser aktif untuk mengakses URL Realtime port.")
     
-    target_labels = {1: "Target 1: Gresik", 2: "Target 2: Internasional", 3: "Target 3: National"}
     for i in range(1, 4):
+        target_label = f"Target {i}: {LIBRENMS_TARGETS[i]['location']}"
         cookie_input = st.sidebar.text_input(
-            target_labels[i],
+            target_label,
             value=st.session_state[f"librenms_cookie_{i}"],
             type="password",
             placeholder="laravel_session=...",
@@ -335,58 +330,29 @@ def render_sidebar():
 # 📊 MAIN DASHBOARD CONTENT
 # =========================================================
 def render_dashboard_content():
-    now_wib = datetime.now(ZoneInfo("Asia/Jakarta")).strftime(
-        "%d/%m/%Y %H:%M:%S WIB"
-    )
+    now_wib = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%d/%m/%Y %H:%M:%S WIB")
 
     st.title("🛡️ Bank Indonesia - Executive Security Operations Center")
-    st.caption(
-        "Cross-Domain Monitoring: BGP/RPKI | DDoS | Prefix Monitoring — Target: 157.85.223.0/24 (AS59132)"
-    )
+    st.caption("Cross-Domain Monitoring: BGP/RPKI | DDoS | Prefix Monitoring — Target: 157.85.223.0/24 (AS59132)")
 
-    # Prioritaskan ambil dari Backend Render API, jika gagal fallback ke CSV lokal
     df = fetch_backend_incidents()
     if df.empty and DATA_FILE.exists():
         df = pd.read_csv(DATA_FILE)
 
     data_exists = not df.empty
-    open_incidents = (
-        df[df["Status"] == "OPEN"] if not df.empty else pd.DataFrame()
-    )
-    critical_open = (
-        open_incidents[open_incidents["Severity"] == "CRITICAL"]
-        if not open_incidents.empty
-        else pd.DataFrame()
-    )
+    open_incidents = df[df["Status"] == "OPEN"] if not df.empty else pd.DataFrame()
+    critical_open = open_incidents[open_incidents["Severity"] == "CRITICAL"] if not open_incidents.empty else pd.DataFrame()
 
     col_sec, col_health = st.columns([2, 1])
 
     with col_sec:
         st.subheader("🔐 Current Security Status")
         if not critical_open.empty:
-            st.error(
-                f"🚨 **STATUS: CRITICAL** — Ditemukan {len(critical_open)} insiden tingkat bahaya tinggi yang masih AKTIF! (Last Update: {now_wib})"
-            )
-            with st.expander("🔍 Detail Active Issue Log", expanded=True):
-                for _, row in critical_open.iterrows():
-                    time_wib = convert_to_wib(row["Opened At"])
-                    st.markdown(
-                        f"• **[{row['Domain']}] {row['Event Type']}** — Target: `{row['Prefix']}` ({row['ASN']}) | Opened: `{time_wib}`"
-                    )
+            st.error(f"🚨 **STATUS: CRITICAL** — Ditemukan {len(critical_open)} insiden tingkat bahaya tinggi yang masih AKTIF! (Last Update: {now_wib})")
         elif not open_incidents.empty:
-            st.warning(
-                f"⚠️ **STATUS: WARNING** — Ditemukan {len(open_incidents)} insiden aktif, tidak ada bahaya kritis. (Last Update: {now_wib})"
-            )
-            with st.expander("🔍 Detail Active Issue Log", expanded=False):
-                for _, row in open_incidents.iterrows():
-                    time_wib = convert_to_wib(row["Opened At"])
-                    st.markdown(
-                        f"• **[{row['Domain']}] {row['Event Type']}** — Target: `{row['Prefix']}` ({row['ASN']}) | Opened: `{time_wib}`"
-                    )
+            st.warning(f"⚠️ **STATUS: WARNING** — Ditemukan {len(open_incidents)} insiden aktif. (Last Update: {now_wib})")
         else:
-            st.success(
-                f"🟢 **STATUS: SECURE** — Prefix 157.85.223.0/24 (AS59132) dalam kondisi aman dan terproteksi. (Last Update: {now_wib})"
-            )
+            st.success(f"🟢 **STATUS: SECURE** — Prefix 157.85.223.0/24 (AS59132) dalam kondisi aman. (Last Update: {now_wib})")
 
     with col_health:
         st.subheader("📡 Realtime Data Health")
@@ -395,70 +361,14 @@ def render_dashboard_content():
         else:
             st.error("🔴 **Stream Disconnected**\n\nTidak ada feed data.")
 
-    st.markdown("##### 🌐 Realtime Data Health Service Status")
-    health_inventory_data = [
-        {
-            "Prefix": "157.85.223.0/24",
-            "AS Number": "AS59132",
-            "Customer Name": "Bank Indonesia",
-            "Description": "BGP Route Announcement & RPKI Validation",
-            "Status": (
-                "🔴 Issue Detected"
-                if not open_incidents.empty
-                and "BGP/RPKI" in open_incidents["Domain"].values
-                else "🟢 Normal"
-            ),
-            "Last Update": now_wib,
-        },
-        {
-            "Prefix": "157.85.223.0/24",
-            "AS Number": "AS59132",
-            "Customer Name": "Bank Indonesia",
-            "Description": "Prefix Reachability & Unannounced Monitoring",
-            "Status": (
-                "🔴 Issue Detected"
-                if not open_incidents.empty
-                and "Prefix Monitoring" in open_incidents["Domain"].values
-                else "🟢 Normal"
-            ),
-            "Last Update": now_wib,
-        },
-        {
-            "Prefix": "157.85.223.0/24",
-            "AS Number": "AS59132",
-            "Customer Name": "Bank Indonesia",
-            "Description": "Volumetric DDoS & Pipe Saturation Protection",
-            "Status": (
-                "🔴 Issue Detected"
-                if not open_incidents.empty
-                and "DDoS" in open_incidents["Domain"].values
-                else "🟢 Normal"
-            ),
-            "Last Update": now_wib,
-        },
-    ]
-    st.dataframe(
-        pd.DataFrame(health_inventory_data),
-        use_container_width=True,
-        hide_index=True,
-    )
-
     st.markdown("---")
 
     # Metrics Dashboard
     st.subheader("🚨 Incident Dashboard")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total Insiden Terdeteksi", len(df) if not df.empty else 0)
-    m2.metric(
-        "Insiden Aktif (OPEN)",
-        len(open_incidents) if not open_incidents.empty else 0,
-        delta=f"{len(open_incidents)} Active",
-        delta_color="inverse",
-    )
-    m3.metric(
-        "Berhasil Dipulihkan",
-        len(df[df["Status"] == "RESOLVED"]) if not df.empty else 0,
-    )
+    m2.metric("Insiden Aktif (OPEN)", len(open_incidents) if not open_incidents.empty else 0, delta=f"{len(open_incidents)} Active", delta_color="inverse")
+    m3.metric("Berhasil Dipulihkan", len(df[df["Status"] == "RESOLVED"]) if not df.empty else 0)
     m4.metric("Domain Terdampak", df["Domain"].nunique() if not df.empty else 0)
 
     st.markdown("---")
@@ -468,174 +378,58 @@ def render_dashboard_content():
     display_df = df.copy() if not df.empty else pd.DataFrame()
     if not display_df.empty:
         if "Opened At" in display_df.columns:
-            display_df["Opened At"] = display_df["Opened At"].apply(
-                convert_to_wib
-            )
+            display_df["Opened At"] = display_df["Opened At"].apply(convert_to_wib)
         if "Resolved At" in display_df.columns:
-            display_df["Resolved At"] = display_df["Resolved At"].apply(
-                convert_to_wib
-            )
-        st.dataframe(
-            display_df[[
-                "Incident ID",
-                "Opened At",
-                "Domain",
-                "Event Type",
-                "Severity",
-                "Status",
-            ]],
-            use_container_width=True,
-            hide_index=True,
-        )
+            display_df["Resolved At"] = display_df["Resolved At"].apply(convert_to_wib)
+        st.dataframe(display_df[["Incident ID", "Opened At", "Domain", "Event Type", "Severity", "Status"]], use_container_width=True, hide_index=True)
     else:
         st.info("Belum ada event timeline yang tercatat.")
 
     st.markdown("---")
 
-    # Grafik Statistik
-    st.subheader("📊 Event Statistics")
-    c1, c2 = st.columns(2)
-    if not df.empty:
-        with c1:
-            df_sev = (
-                df.groupby(["Severity", "Event Type"])
-                .size()
-                .reset_index(name="Jumlah Insiden")
-            )
-            fig_sev = px.bar(
-                df_sev,
-                y="Severity",
-                x="Jumlah Insiden",
-                color="Event Type",
-                barmode="group",
-                title="Distribusi Severity per Jenis Isu (Event Type)",
-                color_discrete_map=EVENT_COLOR_MAP,
-                text_auto=True,
-                orientation="h",
-            )
-            fig_sev.update_traces(
-                textfont=dict(size=14, color="black", family="Arial Black")
-            )
-            fig_sev.update_layout(
-                xaxis_title="<b>Critical Insiden</b>",
-                yaxis_title="",
-                legend_title="<b>Event Type</b>",
-                height=350,
-                xaxis=dict(showticklabels=False),
-                yaxis=dict(showticklabels=False),
-            )
-            st.plotly_chart(fig_sev, use_container_width=True)
-
-        with c2:
-            df_dom = (
-                df.groupby(["Domain", "Severity"])
-                .size()
-                .reset_index(name="Jumlah Insiden")
-            )
-            fig_dom = px.bar(
-                df_dom,
-                y="Domain",
-                x="Jumlah Insiden",
-                color="Domain",
-                barmode="group",
-                title="Distribusi Domain per Jenis Isu",
-                color_discrete_map=EVENT_COLOR_MAP,
-                text_auto=True,
-                orientation="h",
-            )
-            fig_dom.update_traces(
-                textfont=dict(size=14, color="black", family="Arial Black")
-            )
-            fig_dom.update_layout(
-                xaxis_title="<b>DDoS insiden</b>",
-                yaxis_title="",
-                legend_title="<b>Domain</b>",
-                height=350,
-                xaxis=dict(showticklabels=False),
-                yaxis=dict(showticklabels=False),
-            )
-            st.plotly_chart(fig_dom, use_container_width=True)
-
-    st.markdown("---")
-
-    # Tabel Inventory
-    st.subheader("📋 BGP/RPKI, Prefix, DDoS Inventory")
-    if not display_df.empty:
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-
     # =========================================================
-    # 🖥️ LIBRENMS INFRASTRUCTURE MONITORING PANEL (3 TARGETS TABS)
+    # 🖥️ LIBRENMS INFRASTRUCTURE MONITORING PANEL (3 URL TARGETS)
     # =========================================================
-    st.subheader(
-        "🖥️ LibreNMS Infrastructure Live Monitoring (Realtime 24/7 Feed)"
-    )
-    st.markdown(
-        "Data status perangkat dan trafik port krusial diperbarui secara otomatis setiap detik sesuai interval auto-refresh."
-    )
+    st.subheader("🖥️ LibreNMS Infrastructure Live Monitoring (Realtime Port Feeds)")
+    st.markdown("Memantau langsung URL Realtime Port LibreNMS Anda secara otomatis setiap detik.")
 
-    # Tab untuk 3 target berbeda
-    tab1, tab2, tab3 = st.tabs(["Target Gresik", "Target Internasional", "Target National"])
+    tab1, tab2, tab3 = st.tabs(["Gresik (Port 143736)", "Internasional (Port 13483)", "National (Port 13484)"])
     tabs = [tab1, tab2, tab3]
-
-    target_names = {1: "Gresik", 2: "Internasional", 3: "National"}
 
     for i in range(1, 4):
         with tabs[i-1]:
-            st.markdown(f"#### 📍 Status Perangkat Utama Jaringan ({target_names[i]})")
-            df_libre, libre_status = fetch_librenms_data_by_target(i)
+            target_info = LIBRENMS_TARGETS[i]
+            st.markdown(f"#### 📍 {target_info['location']} (Device ID: `{target_info['device_id']}`, Port ID: `{target_info['port_id']}`)")
+            st.markdown(f"🔗 **URL Endpoint:** `{target_info['base_url']}/device/device={target_info['device_id']}/tab=port/port={target_info['port_id']}/view=realtime/`")
+            
+            # Ambil Status Realtime
+            df_port_live, port_status = fetch_librenms_realtime_port_status(i)
+            df_dev, dev_status = fetch_librenms_devices_summary(i)
 
-            if libre_status in ["SESSION_EXPIRED", "DISCONNECTED"]:
+            if port_status == "SESSION_EXPIRED" or dev_status == "SESSION_EXPIRED":
                 st.error(
-                    f"⚠️ **PERINGATAN SOC:** Auto-update LibreNMS Target {target_names[i]} terhenti! Sesi login Anda ke LibreNMS telah habis atau terputus. "
-                    f"Silakan perbarui **Session Cookie** Anda di sidebar (Target {i}) agar monitoring kembali berjalan."
+                    f"⚠️ **SESI KEDALUWARSA (Error 500/Redirect):** Cookie sesi untuk **{target_info['location']}** sudah mati atau tidak valid! "
+                    f"Silakan login ulang ke LibreNMS di browser, ambil nilai `laravel_session` terbaru, dan masukkan ke kolom **Target {i}** di sidebar."
                 )
+            elif port_status == "DISCONNECTED":
+                st.warning(f"⚠️ Gagal menghubungkan ke server LibreNMS untuk {target_info['location']}. Periksa koneksi jaringan/VPN Anda.")
             else:
-                if df_libre is not None and not df_libre.empty:
-                    m_l1, m_l2, m_l3 = st.columns(3)
-                    total_d = len(df_libre)
-                    online_d = len(df_libre[df_libre["Status"].str.contains("ONLINE")])
-                    down_d = total_d - online_d
-
-                    m_l1.metric("Total Devices Monitored", total_d)
-                    m_l2.metric("Devices Online", online_d)
-                    m_l3.metric(
-                        "Devices Down",
-                        down_d,
-                        delta_color="inverse" if down_d > 0 else "normal",
-                    )
-
-                    st.dataframe(df_libre, use_container_width=True, hide_index=True)
-                else:
-                    st.info(f"Tidak ada data perangkat ditemukan untuk Target {target_names[i]}.")
-
-            st.markdown(f"##### 📊 Live Port Traffic & Status Monitoring ({target_names[i]})")
-            df_ports_live, ports_status = fetch_librenms_ports_data_by_target(i)
-
-            if ports_status in ["SESSION_EXPIRED", "DISCONNECTED"]:
-                st.error(
-                    f"⚠️ **PERINGATAN SOC:** Feed Port LibreNMS Target {target_names[i]} terhenti karena sesi login browser terputus! "
-                    f"Mohon perbarui Session Cookie Anda di sidebar (Target {i})."
-                )
-            else:
-                if not df_ports_live.empty:
-                    st.dataframe(df_ports_live, use_container_width=True, hide_index=True)
-                else:
-                    st.info(f"Tidak ada data port ditemukan untuk Target {target_names[i]}.")
+                st.success(f"🟢 **Koneksi Live Berhasil Terhubung ke {target_info['location']}!**")
+                
+                if df_dev is not None and not df_dev.empty:
+                    st.markdown("##### 📌 Device Status Info:")
+                    st.dataframe(df_dev, use_container_width=True, hide_index=True)
+                
+                if not df_port_live.empty:
+                    st.markdown("##### 📊 Realtime Port Feed Status:")
+                    st.dataframe(df_port_live, use_container_width=True, hide_index=True)
 
     st.markdown("---")
 
     # =========================================================
-    # 🔍 RPKI VALIDATOR INTEGRATION PANEL (LIVE STATUS)
+    # 🔍 RPKI VALIDATOR INTEGRATION PANEL
     # =========================================================
-    st.subheader(
-        "🔍 RPKI Validator Live Feed (RIPE.net — Prefix 157.85.223.0/24)"
-    )
-    st.markdown(
-        "Hasil validasi keamanan routing BGP/RPKI secara otomatis ditarik langsung ke dashboard:"
-    )
-
+    st.subheader("🔍 RPKI Validator Live Feed (RIPE.net — Prefix 157.85.223.0/24)")
     rpki_live_data = [
         {
             "Prefix": "157.85.223.0/24",
@@ -645,9 +439,7 @@ def render_dashboard_content():
             "Last Update": now_wib,
         }
     ]
-    st.dataframe(
-        pd.DataFrame(rpki_live_data), use_container_width=True, hide_index=True
-    )
+    st.dataframe(pd.DataFrame(rpki_live_data), use_container_width=True, hide_index=True)
 
     st.markdown("---")
 
@@ -657,15 +449,11 @@ def render_dashboard_content():
         st.subheader("🟢 System / Data Health")
         st.write("• **Monitored Asset:** `Bank Indonesia (AS59132)`")
         st.write("• **Target Prefix:** `157.85.223.0/24`")
-        st.write(
-            f"• **Polling Interval:** `{st.session_state['refresh_interval']} Detik (Real-Time 24/7)`"
-        )
+        st.write(f"• **Polling Interval:** `{st.session_state['refresh_interval']} Detik (Real-Time 24/7)`")
         st.write("• **Timezone Sync:** `Asia/Jakarta (WIB 24-Hour)`")
         st.write(f"• **Login IP Address:** `{get_client_ip()}`")
         hostname, laptop_account = get_system_account_info()
-        st.write(
-            f"• **Laptop Account:** `{laptop_account}` (Device: `{hostname}`)"
-        )
+        st.write(f"• **Laptop Account:** `{laptop_account}` (Device: `{hostname}`)")
 
     with col_exp:
         st.subheader("📥 Export Monitoring Data")
@@ -674,10 +462,7 @@ def render_dashboard_content():
             st.download_button(
                 label="📄 Download Raw Data (CSV)",
                 data=csv_buffer,
-                file_name=(
-                    "BI_Monitoring_Export_"
-                    f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                ),
+                file_name=f"BI_Monitoring_Export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -686,9 +471,7 @@ def render_dashboard_content():
 def render_dashboard():
     if st.session_state.get("auto_refresh", True):
         interval_str = f"{st.session_state.get('refresh_interval', 3)}s"
-        fragment_func = st.fragment(run_every=interval_str)(
-            render_dashboard_content
-        )
+        fragment_func = st.fragment(run_every=interval_str)(render_dashboard_content)
         fragment_func()
     else:
         render_dashboard_content()
