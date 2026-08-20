@@ -146,10 +146,7 @@ def fetch_librenms_devices_summary(target_index):
     headers = {"User-Agent": "Mozilla/5.0"}
     
     if user_cookie:
-        if "laravel_session=" not in user_cookie:
-            headers["Cookie"] = f"laravel_session={user_cookie}"
-        else:
-            headers["Cookie"] = user_cookie
+        headers["Cookie"] = user_cookie
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
@@ -168,7 +165,7 @@ def fetch_librenms_devices_summary(target_index):
                         "Uptime": d.get("uptime_short", "-"),
                         "Status": ("🟢 ONLINE" if d.get("status") == 1 else "🔴 DOWN"),
                     })
-            if not data and devices: # Fallback tampilkan device pertama jika ID tidak match persis
+            if not data and devices:
                 d = devices[0]
                 data.append({
                     "Hostname": d.get("hostname"),
@@ -185,31 +182,33 @@ def fetch_librenms_devices_summary(target_index):
 
 
 def fetch_librenms_realtime_port_status(target_index):
-    """Memvalidasi koneksi dan status realtime port berdasarkan URL spesifik Anda."""
+    """Memvalidasi koneksi dan status realtime port dengan header lengkap (Cloudflare & F5)."""
     current_time_wib = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%d/%m/%Y %H:%M:%S WIB")
     target = LIBRENMS_TARGETS[target_index]
     
-    # URL Realtime target yang Anda tuju
     realtime_url = f"{target['base_url']}/device/device={target['device_id']}/tab=port/port={target['port_id']}/view=realtime/"
     
-    user_cookie = st.session_state.get(f"librenms_cookie_{target_index}", "").strip()
-    headers = {"User-Agent": "Mozilla/5.0"}
+    raw_cookie = st.session_state.get(f"librenms_cookie_{target_index}", "").strip()
     
-    if user_cookie:
-        if "laravel_session=" not in user_cookie:
-            headers["Cookie"] = f"laravel_session={user_cookie}"
-        else:
-            headers["Cookie"] = user_cookie
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-NZ,en;q=0.9,id-ID;q=0.8,id;q=0.7,en-GB;q=0.6,en-US;q=0.5",
+        "Cache-Control": "max-age=0",
+        "Connection": "keep-alive",
+        "Cookie": raw_cookie,
+        "Host": "venus.xlsmart.co.id",
+        "Referer": f"{target['base_url']}/device/device={target['device_id']}/tab=port/port={target['port_id']}/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+        "Upgrade-Insecure-Requests": "1"
+    }
 
     try:
-        # Cek akses halaman realtime web LibreNMS
         response = requests.get(realtime_url, headers=headers, timeout=10, allow_redirects=False)
         
-        # Jika status 302/301 atau redirect ke login, artinya cookie mati / expired
-        if response.status_code in [301, 302, 401, 403]:
+        if response.status_code in [301, 302, 401, 403, 500]:
             return pd.DataFrame(), "SESSION_EXPIRED"
             
-        if response.status_code == 200:
+        if response.status_code in [200, 304]:
             data = [{
                 "Port ID": target["port_id"],
                 "Device ID": target["device_id"],
@@ -279,9 +278,8 @@ def render_sidebar():
 
     st.sidebar.markdown("---")
     
-    # 🍪 Konfigurasi Input Cookie LibreNMS untuk 3 Target URL Anda
     st.sidebar.subheader("🔑 LibreNMS Session Cookies")
-    st.sidebar.caption("Masukkan cookie sesi browser aktif untuk mengakses URL Realtime port.")
+    st.sidebar.caption("Tempel seluruh string Cookie dari Network tab browser Anda (cf_clearance, XSRF-TOKEN, laravel_session, dll).")
     
     for i in range(1, 4):
         target_label = f"Target {i}: {LIBRENMS_TARGETS[i]['location']}"
@@ -289,7 +287,7 @@ def render_sidebar():
             target_label,
             value=st.session_state[f"librenms_cookie_{i}"],
             type="password",
-            placeholder="laravel_session=...",
+            placeholder="cf_clearance=...; laravel_session=...",
             key=f"input_cookie_{i}"
         )
         if cookie_input != st.session_state[f"librenms_cookie_{i}"]:
@@ -402,14 +400,13 @@ def render_dashboard_content():
             st.markdown(f"#### 📍 {target_info['location']} (Device ID: `{target_info['device_id']}`, Port ID: `{target_info['port_id']}`)")
             st.markdown(f"🔗 **URL Endpoint:** `{target_info['base_url']}/device/device={target_info['device_id']}/tab=port/port={target_info['port_id']}/view=realtime/`")
             
-            # Ambil Status Realtime
             df_port_live, port_status = fetch_librenms_realtime_port_status(i)
             df_dev, dev_status = fetch_librenms_devices_summary(i)
 
             if port_status == "SESSION_EXPIRED" or dev_status == "SESSION_EXPIRED":
                 st.error(
                     f"⚠️ **SESI KEDALUWARSA (Error 500/Redirect):** Cookie sesi untuk **{target_info['location']}** sudah mati atau tidak valid! "
-                    f"Silakan login ulang ke LibreNMS di browser, ambil nilai `laravel_session` terbaru, dan masukkan ke kolom **Target {i}** di sidebar."
+                    f"Silakan salin ulang string Cookie lengkap dari browser Anda dan masukkan ke kolom **Target {i}** di sidebar."
                 )
             elif port_status == "DISCONNECTED":
                 st.warning(f"⚠️ Gagal menghubungkan ke server LibreNMS untuk {target_info['location']}. Periksa koneksi jaringan/VPN Anda.")
