@@ -116,6 +116,10 @@ def fetch_librenms_data():
 
     try:
         response = requests.get(url, timeout=10)
+        # Deteksi jika sesi login expired / redirect ke halaman login / unauthorized
+        if response.status_code in [401, 403] or 'text/html' in response.headers.get('Content-Type', ''):
+            return None, "SESSION_EXPIRED"
+            
         if response.status_code == 200:
             devices = response.json().get("devices", [])
             data = []
@@ -129,29 +133,37 @@ def fetch_librenms_data():
                         "🟢 ONLINE" if d.get("status") == 1 else "🔴 DOWN"
                     ),
                 })
-            return pd.DataFrame(data), None
+            return pd.DataFrame(data), "OK"
         else:
-            return None, None
+            return None, "DISCONNECTED"
     except Exception:
-        return None, None
+        return None, "DISCONNECTED"
 
 
 def fetch_librenms_ports_data():
-    """Mengambil data port monitoring spesifik (Realtime 24/7 View + Last Update Timestamp)."""
+    """Mengambil data port monitoring spesifik (Realtime 24/7 View + Last Update Timestamp + Session Check)."""
     current_time_wib = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%d/%m/%Y %H:%M:%S WIB")
     
     url = f"{LIBRENMS_BASE_URL}/api/v0/ports"
     try:
         response = requests.get(url, timeout=10)
+        
+        # Deteksi jika sesi login expired atau unauthorized
+        if response.status_code in [401, 403] or 'text/html' in response.headers.get('Content-Type', ''):
+            return pd.DataFrame(), "SESSION_EXPIRED"
+            
         if response.status_code == 200:
             ports = response.json().get("ports", [])
             data = []
             target_port_ids = [143736, 13483, 13484]
             for p in ports:
                 if p.get("port_id") in target_port_ids or len(data) < 10:
+                    port_id = p.get("port_id")
+                    location_name = {143736: "BI DKU Gresik", 13483: "BI Internasional", 13484: "BI National"}.get(port_id, p.get("ifDescr", "-"))
+                    
                     data.append({
-                        "Port ID": p.get("port_id"),
-                        "Location": p.get("ifDescr", "-"),
+                        "Port ID": port_id,
+                        "Location": location_name,
                         "Interface": p.get("ifName", "-"),
                         "Traffic In/Out": "Active Sync",
                         "Status": (
@@ -162,37 +174,11 @@ def fetch_librenms_ports_data():
                         "Last Update": current_time_wib,
                     })
             if data:
-                return pd.DataFrame(data)
+                return pd.DataFrame(data), "OK"
     except Exception:
         pass
 
-    # Fallback dataframe real-time dengan kolom Last Update
-    return pd.DataFrame([
-        {
-            "Port ID": 143736,
-            "Location": "BI DKU Gresik",
-            "Interface": "Gi 0/1",
-            "Traffic In/Out": "125.4 Mbps / 42.1 Mbps",
-            "Status": "🟢 UP (Normal)",
-            "Last Update": current_time_wib,
-        },
-        {
-            "Port ID": 13483,
-            "Location": "BI Internasional",
-            "Interface": "Te 1/1",
-            "Traffic In/Out": "890.2 Mbps / 650.8 Mbps",
-            "Status": "🟢 UP (Normal)",
-            "Last Update": current_time_wib,
-        },
-        {
-            "Port ID": 13484,
-            "Location": "BI National",
-            "Interface": "Te 1/2",
-            "Traffic In/Out": "1.42 Gbps / 1.10 Gbps",
-            "Status": "🟢 UP (Normal)",
-            "Last Update": current_time_wib,
-        },
-    ])
+    return pd.DataFrame(), "DISCONNECTED"
 
 
 # =========================================================
@@ -541,31 +527,44 @@ def render_dashboard_content():
         "Data status perangkat dan trafik port krusial diperbarui secara otomatis setiap detik sesuai interval auto-refresh."
     )
 
-    df_libre, err_libre = fetch_librenms_data()
+    df_libre, libre_status = fetch_librenms_data()
 
-    if df_libre is not None and not df_libre.empty:
-        m_l1, m_l2, m_l3 = st.columns(3)
-        total_d = len(df_libre)
-        online_d = len(df_libre[df_libre["Status"].str.contains("ONLINE")])
-        down_d = total_d - online_d
-
-        m_l1.metric("Total Devices Monitored", total_d)
-        m_l2.metric("Devices Online", online_d)
-        m_l3.metric(
-            "Devices Down",
-            down_d,
-            delta_color="inverse" if down_d > 0 else "normal",
+    if libre_status in ["SESSION_EXPIRED", "DISCONNECTED"]:
+        st.error(
+            "⚠️ **PERINGATAN SOC:** Auto-update LibreNMS terhenti! Sesi login Anda ke LibreNMS telah habis atau terputus. "
+            "Silakan lakukan **login ulang ke LibreNMS** di browser Anda agar monitoring 24/7 kembali berjalan."
         )
+    else:
+        if df_libre is not None and not df_libre.empty:
+            m_l1, m_l2, m_l3 = st.columns(3)
+            total_d = len(df_libre)
+            online_d = len(df_libre[df_libre["Status"].str.contains("ONLINE")])
+            down_d = total_d - online_d
 
-        st.markdown("##### 📌 Status Perangkat Utama Jaringan")
-        st.dataframe(df_libre, use_container_width=True, hide_index=True)
+            m_l1.metric("Total Devices Monitored", total_d)
+            m_l2.metric("Devices Online", online_d)
+            m_l3.metric(
+                "Devices Down",
+                down_d,
+                delta_color="inverse" if down_d > 0 else "normal",
+            )
 
-    # Menampilkan tabel live port monitoring lengkap dengan kolom Last Update
+            st.markdown("##### 📌 Status Perangkat Utama Jaringan")
+            st.dataframe(df_libre, use_container_width=True, hide_index=True)
+
+    # Menampilkan tabel live port monitoring lengkap dengan deteksi sesi login
     st.markdown(
         "##### 📊 Live Port Traffic & Status Monitoring (BI DKU Gresik, Internasional, National)"
     )
-    df_ports_live = fetch_librenms_ports_data()
-    st.dataframe(df_ports_live, use_container_width=True, hide_index=True)
+    df_ports_live, ports_status = fetch_librenms_ports_data()
+
+    if ports_status in ["SESSION_EXPIRED", "DISCONNECTED"]:
+        st.error(
+            "⚠️ **PERINGATAN SOC:** Feed Port LibreNMS terhenti karena sesi login browser terputus! "
+            "Mohon aktifkan kembali sesi login LibreNMS Anda."
+        )
+    else:
+        st.dataframe(df_ports_live, use_container_width=True, hide_index=True)
 
     st.markdown("---")
 
