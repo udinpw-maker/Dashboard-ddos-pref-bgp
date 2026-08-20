@@ -36,6 +36,10 @@ if "auto_refresh" not in st.session_state:
 if "refresh_interval" not in st.session_state:
     st.session_state["refresh_interval"] = 3
 
+# Init Session State LibreNMS Cookie per User
+if "librenms_cookie" not in st.session_state:
+    st.session_state["librenms_cookie"] = ""
+
 # =========================================================
 # 🎨 MAP WARNA KHUSUS PER JENIS ISU / DOMAIN
 # =========================================================
@@ -111,11 +115,17 @@ def convert_to_wib(utc_time_str: str) -> str:
 
 
 def fetch_librenms_data():
-    """Mengambil data device LibreNMS."""
+    """Mengambil data device LibreNMS menggunakan Cookie sesi user."""
     url = f"{LIBRENMS_BASE_URL}/api/v0/devices"
+    
+    # Ambil cookie dari session state user yang sedang aktif
+    user_cookie = st.session_state.get("librenms_cookie", "")
+    headers = {}
+    if user_cookie:
+        headers["Cookie"] = user_cookie
 
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
         # Deteksi jika sesi login expired / redirect ke halaman login / unauthorized
         if response.status_code in [401, 403] or 'text/html' in response.headers.get('Content-Type', ''):
             return None, "SESSION_EXPIRED"
@@ -145,8 +155,15 @@ def fetch_librenms_ports_data():
     current_time_wib = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%d/%m/%Y %H:%M:%S WIB")
     
     url = f"{LIBRENMS_BASE_URL}/api/v0/ports"
+    
+    # Ambil cookie dari session state user yang sedang aktif
+    user_cookie = st.session_state.get("librenms_cookie", "")
+    headers = {}
+    if user_cookie:
+        headers["Cookie"] = user_cookie
+
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
         
         # Deteksi jika sesi login expired atau unauthorized
         if response.status_code in [401, 403] or 'text/html' in response.headers.get('Content-Type', ''):
@@ -251,6 +268,23 @@ def render_sidebar():
         st.session_state["is_logged_in"] = False
         st.session_state["user_role"] = None
         st.session_state["username"] = ""
+        st.session_state["librenms_cookie"] = ""
+        st.rerun()
+
+    st.sidebar.markdown("---")
+    
+    # 🍪 Konfigurasi Input Cookie LibreNMS per User
+    st.sidebar.subheader("🔑 LibreNMS Session Config")
+    st.sidebar.caption("Masukkan cookie sesi browser Anda agar monitoring tersinkronisasi.")
+    cookie_input = st.sidebar.text_input(
+        "Paste Session Cookie",
+        value=st.session_state["librenms_cookie"],
+        type="password",
+        placeholder="laravel_session=...",
+        help="Ambil nilai cookie dari F12 -> Application/Network di browser saat login ke LibreNMS."
+    )
+    if cookie_input != st.session_state["librenms_cookie"]:
+        st.session_state["librenms_cookie"] = cookie_input
         st.rerun()
 
     st.sidebar.markdown("---")
@@ -532,7 +566,7 @@ def render_dashboard_content():
     if libre_status in ["SESSION_EXPIRED", "DISCONNECTED"]:
         st.error(
             "⚠️ **PERINGATAN SOC:** Auto-update LibreNMS terhenti! Sesi login Anda ke LibreNMS telah habis atau terputus. "
-            "Silakan lakukan **login ulang ke LibreNMS** di browser Anda agar monitoring 24/7 kembali berjalan."
+            "Silakan perbarui **Session Cookie** Anda di sidebar agar monitoring 24/7 kembali berjalan."
         )
     else:
         if df_libre is not None and not df_libre.empty:
@@ -561,7 +595,7 @@ def render_dashboard_content():
     if ports_status in ["SESSION_EXPIRED", "DISCONNECTED"]:
         st.error(
             "⚠️ **PERINGATAN SOC:** Feed Port LibreNMS terhenti karena sesi login browser terputus! "
-            "Mohon aktifkan kembali sesi login LibreNMS Anda."
+            "Mohon perbarui Session Cookie Anda di sidebar."
         )
     else:
         st.dataframe(df_ports_live, use_container_width=True, hide_index=True)
