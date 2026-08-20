@@ -36,9 +36,10 @@ if "auto_refresh" not in st.session_state:
 if "refresh_interval" not in st.session_state:
     st.session_state["refresh_interval"] = 3
 
-# Init Session State LibreNMS Cookie per User
-if "librenms_cookie" not in st.session_state:
-    st.session_state["librenms_cookie"] = ""
+# Init Session State LibreNMS Cookies (3 Target)
+for i in range(1, 4):
+    if f"librenms_cookie_{i}" not in st.session_state:
+        st.session_state[f"librenms_cookie_{i}"] = ""
 
 # =========================================================
 # 🎨 MAP WARNA KHUSUS PER JENIS ISU / DOMAIN
@@ -50,9 +51,13 @@ EVENT_COLOR_MAP = {
 }
 
 # =========================================================
-# 🌐 KONFIGURASI URL LIBRENMS & BACKEND API
+# 🌐 KONFIGURASI URL LIBRENMS (3 TARGET) & BACKEND API
 # =========================================================
-LIBRENMS_BASE_URL = "https://venus.xlsmart.co.id"
+LIBRENMS_URLS = {
+    1: "https://venus.xlsmart.co.id",  # Target 1 (Gresik / Default)
+    2: "https://url-target-kedua.com",  # Target 2 (Internasional)
+    3: "https://url-target-ketiga.com"   # Target 3 (National)
+}
 
 
 def fetch_backend_incidents():
@@ -114,19 +119,22 @@ def convert_to_wib(utc_time_str: str) -> str:
         return str(utc_time_str)
 
 
-def fetch_librenms_data():
-    """Mengambil data device LibreNMS menggunakan Cookie sesi user."""
-    url = f"{LIBRENMS_BASE_URL}/api/v0/devices"
+def fetch_librenms_data_by_target(target_index):
+    """Mengambil data device LibreNMS berdasarkan indeks target (1, 2, 3) dengan validasi cookie."""
+    base_url = LIBRENMS_URLS.get(target_index, LIBRENMS_URLS[1])
+    url = f"{base_url}/api/v0/devices"
     
-    # Ambil cookie dari session state user yang sedang aktif
-    user_cookie = st.session_state.get("librenms_cookie", "")
-    headers = {}
+    user_cookie = st.session_state.get(f"librenms_cookie_{target_index}", "").strip()
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
     if user_cookie:
-        headers["Cookie"] = user_cookie
+        if "laravel_session=" not in user_cookie:
+            headers["Cookie"] = f"laravel_session={user_cookie}"
+        else:
+            headers["Cookie"] = user_cookie
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
-        # Deteksi jika sesi login expired / redirect ke halaman login / unauthorized
         if response.status_code in [401, 403] or 'text/html' in response.headers.get('Content-Type', ''):
             return None, "SESSION_EXPIRED"
             
@@ -150,22 +158,24 @@ def fetch_librenms_data():
         return None, "DISCONNECTED"
 
 
-def fetch_librenms_ports_data():
-    """Mengambil data port monitoring spesifik (Realtime 24/7 View + Last Update Timestamp + Session Check)."""
+def fetch_librenms_ports_data_by_target(target_index):
+    """Mengambil data port monitoring spesifik berdasarkan indeks target (1, 2, 3)."""
     current_time_wib = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%d/%m/%Y %H:%M:%S WIB")
+    base_url = LIBRENMS_URLS.get(target_index, LIBRENMS_URLS[1])
+    url = f"{base_url}/api/v0/ports"
     
-    url = f"{LIBRENMS_BASE_URL}/api/v0/ports"
+    user_cookie = st.session_state.get(f"librenms_cookie_{target_index}", "").strip()
+    headers = {"User-Agent": "Mozilla/5.0"}
     
-    # Ambil cookie dari session state user yang sedang aktif
-    user_cookie = st.session_state.get("librenms_cookie", "")
-    headers = {}
     if user_cookie:
-        headers["Cookie"] = user_cookie
+        if "laravel_session=" not in user_cookie:
+            headers["Cookie"] = f"laravel_session={user_cookie}"
+        else:
+            headers["Cookie"] = user_cookie
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
         
-        # Deteksi jika sesi login expired atau unauthorized
         if response.status_code in [401, 403] or 'text/html' in response.headers.get('Content-Type', ''):
             return pd.DataFrame(), "SESSION_EXPIRED"
             
@@ -268,24 +278,28 @@ def render_sidebar():
         st.session_state["is_logged_in"] = False
         st.session_state["user_role"] = None
         st.session_state["username"] = ""
-        st.session_state["librenms_cookie"] = ""
+        for i in range(1, 4):
+            st.session_state[f"librenms_cookie_{i}"] = ""
         st.rerun()
 
     st.sidebar.markdown("---")
     
-    # 🍪 Konfigurasi Input Cookie LibreNMS per User
-    st.sidebar.subheader("🔑 LibreNMS Session Config")
-    st.sidebar.caption("Masukkan cookie sesi browser Anda agar monitoring tersinkronisasi.")
-    cookie_input = st.sidebar.text_input(
-        "Paste Session Cookie",
-        value=st.session_state["librenms_cookie"],
-        type="password",
-        placeholder="laravel_session=...",
-        help="Ambil nilai cookie dari F12 -> Application/Network di browser saat login ke LibreNMS."
-    )
-    if cookie_input != st.session_state["librenms_cookie"]:
-        st.session_state["librenms_cookie"] = cookie_input
-        st.rerun()
+    # 🍪 Konfigurasi Input Cookie LibreNMS untuk 3 Target
+    st.sidebar.subheader("🔑 LibreNMS Sessions (3 Targets)")
+    st.sidebar.caption("Masukkan cookie sesi untuk masing-masing target monitoring.")
+    
+    target_labels = {1: "Target 1: Gresik", 2: "Target 2: Internasional", 3: "Target 3: National"}
+    for i in range(1, 4):
+        cookie_input = st.sidebar.text_input(
+            target_labels[i],
+            value=st.session_state[f"librenms_cookie_{i}"],
+            type="password",
+            placeholder="laravel_session=...",
+            key=f"input_cookie_{i}"
+        )
+        if cookie_input != st.session_state[f"librenms_cookie_{i}"]:
+            st.session_state[f"librenms_cookie_{i}"] = cookie_input
+            st.rerun()
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔄 Auto-Refresh Control")
@@ -552,7 +566,7 @@ def render_dashboard_content():
     st.markdown("---")
 
     # =========================================================
-    # 🖥️ LIBRENMS INFRASTRUCTURE MONITORING PANEL (LIVE DISPLAY 24/7)
+    # 🖥️ LIBRENMS INFRASTRUCTURE MONITORING PANEL (3 TARGETS TABS)
     # =========================================================
     st.subheader(
         "🖥️ LibreNMS Infrastructure Live Monitoring (Realtime 24/7 Feed)"
@@ -561,44 +575,54 @@ def render_dashboard_content():
         "Data status perangkat dan trafik port krusial diperbarui secara otomatis setiap detik sesuai interval auto-refresh."
     )
 
-    df_libre, libre_status = fetch_librenms_data()
+    # Tab untuk 3 target berbeda
+    tab1, tab2, tab3 = st.tabs(["Target Gresik", "Target Internasional", "Target National"])
+    tabs = [tab1, tab2, tab3]
 
-    if libre_status in ["SESSION_EXPIRED", "DISCONNECTED"]:
-        st.error(
-            "⚠️ **PERINGATAN SOC:** Auto-update LibreNMS terhenti! Sesi login Anda ke LibreNMS telah habis atau terputus. "
-            "Silakan perbarui **Session Cookie** Anda di sidebar agar monitoring 24/7 kembali berjalan."
-        )
-    else:
-        if df_libre is not None and not df_libre.empty:
-            m_l1, m_l2, m_l3 = st.columns(3)
-            total_d = len(df_libre)
-            online_d = len(df_libre[df_libre["Status"].str.contains("ONLINE")])
-            down_d = total_d - online_d
+    target_names = {1: "Gresik", 2: "Internasional", 3: "National"}
 
-            m_l1.metric("Total Devices Monitored", total_d)
-            m_l2.metric("Devices Online", online_d)
-            m_l3.metric(
-                "Devices Down",
-                down_d,
-                delta_color="inverse" if down_d > 0 else "normal",
-            )
+    for i in range(1, 4):
+        with tabs[i-1]:
+            st.markdown(f"#### 📍 Status Perangkat Utama Jaringan ({target_names[i]})")
+            df_libre, libre_status = fetch_librenms_data_by_target(i)
 
-            st.markdown("##### 📌 Status Perangkat Utama Jaringan")
-            st.dataframe(df_libre, use_container_width=True, hide_index=True)
+            if libre_status in ["SESSION_EXPIRED", "DISCONNECTED"]:
+                st.error(
+                    f"⚠️ **PERINGATAN SOC:** Auto-update LibreNMS Target {target_names[i]} terhenti! Sesi login Anda ke LibreNMS telah habis atau terputus. "
+                    f"Silakan perbarui **Session Cookie** Anda di sidebar (Target {i}) agar monitoring kembali berjalan."
+                )
+            else:
+                if df_libre is not None and not df_libre.empty:
+                    m_l1, m_l2, m_l3 = st.columns(3)
+                    total_d = len(df_libre)
+                    online_d = len(df_libre[df_libre["Status"].str.contains("ONLINE")])
+                    down_d = total_d - online_d
 
-    # Menampilkan tabel live port monitoring lengkap dengan deteksi sesi login
-    st.markdown(
-        "##### 📊 Live Port Traffic & Status Monitoring (BI DKU Gresik, Internasional, National)"
-    )
-    df_ports_live, ports_status = fetch_librenms_ports_data()
+                    m_l1.metric("Total Devices Monitored", total_d)
+                    m_l2.metric("Devices Online", online_d)
+                    m_l3.metric(
+                        "Devices Down",
+                        down_d,
+                        delta_color="inverse" if down_d > 0 else "normal",
+                    )
 
-    if ports_status in ["SESSION_EXPIRED", "DISCONNECTED"]:
-        st.error(
-            "⚠️ **PERINGATAN SOC:** Feed Port LibreNMS terhenti karena sesi login browser terputus! "
-            "Mohon perbarui Session Cookie Anda di sidebar."
-        )
-    else:
-        st.dataframe(df_ports_live, use_container_width=True, hide_index=True)
+                    st.dataframe(df_libre, use_container_width=True, hide_index=True)
+                else:
+                    st.info(f"Tidak ada data perangkat ditemukan untuk Target {target_names[i]}.")
+
+            st.markdown(f"##### 📊 Live Port Traffic & Status Monitoring ({target_names[i]})")
+            df_ports_live, ports_status = fetch_librenms_ports_data_by_target(i)
+
+            if ports_status in ["SESSION_EXPIRED", "DISCONNECTED"]:
+                st.error(
+                    f"⚠️ **PERINGATAN SOC:** Feed Port LibreNMS Target {target_names[i]} terhenti karena sesi login browser terputus! "
+                    f"Mohon perbarui Session Cookie Anda di sidebar (Target {i})."
+                )
+            else:
+                if not df_ports_live.empty:
+                    st.dataframe(df_ports_live, use_container_width=True, hide_index=True)
+                else:
+                    st.info(f"Tidak ada data port ditemukan untuk Target {target_names[i]}.")
 
     st.markdown("---")
 
